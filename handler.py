@@ -262,6 +262,18 @@ def clear_all_site_status(event, context):
     return _get_response(200, {"items_removed": items_removed})
 
 
+def _enclosure_val(enclosure, key):
+    """Reads one value out of an enclosure status device, or None if absent.
+
+    Status values arrive wrapped as {"val": ..., "timestamp": ...}; anything
+    else means the site reported a shape we do not recognise.
+    """
+    entry = enclosure.get(key)
+    if isinstance(entry, dict):
+        return entry.get('val')
+    return None
+
+
 def get_all_site_open_status(event, context):
     """Creates a dictionary of sites with true/false value describing weather ok to open.
     
@@ -315,8 +327,41 @@ def get_all_site_open_status(event, context):
 
                 # If no problems till now, add the wx_ok key to our response payload.
                 all_open_status[site]['wx_ok'] = wx_ok
-            except: 
+            except:
                 # One possible reason for failure: a site reports an empty status value under "observing_conditions"
                 print(f"Warning: failed to get wx_ok status for site {site}")
+
+        # Try to add the roof state, but skip if it's not available. Same
+        # defensive shape as wx_ok above: one site reporting an unexpected
+        # enclosure status must not take out the whole endpoint.
+        if status_entry['statusType'] == 'enclosure' and 'enclosure' in status:
+            try:
+                # Assume a single enclosure device, as the weather branch does.
+                enclosure_key = list(status['enclosure'])[0]
+                enclosure = status['enclosure'][enclosure_key]
+
+                # First matching reason wins; these are not mutually exclusive
+                # in the status but only one is worth showing.
+                shut_reason = None
+                for reason, key in (
+                    ('bad_weather', 'shut_reason_bad_weather'),
+                    ('daytime', 'shut_reason_daytime'),
+                    ('manual', 'shut_reason_manual_mode'),
+                ):
+                    if _enclosure_val(enclosure, key) in possible_trues:
+                        shut_reason = reason
+                        break
+
+                # shutter_status and enclosure_is_open can disagree, so both are
+                # reported and the consumer decides. The UI treats the shutter
+                # as authoritative, matching the site status footer.
+                all_open_status[site]['enclosure_status'] = {
+                    'shutter': _enclosure_val(enclosure, 'shutter_status'),
+                    'is_open': _enclosure_val(enclosure, 'enclosure_is_open') in possible_trues,
+                    'mode': _enclosure_val(enclosure, 'enclosure_mode'),
+                    'shut_reason': shut_reason,
+                }
+            except:
+                print(f"Warning: failed to get enclosure status for site {site}")
 
     return _get_response(200, all_open_status)
